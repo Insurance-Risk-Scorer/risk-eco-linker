@@ -4,19 +4,16 @@ import { Separator } from "@/components/ui/separator";
 import {
   TreePine,
   Flame,
-  Thermometer,
-  Droplets,
-  Wind,
   Leaf,
   Waves,
   AlertCircle,
 } from "lucide-react";
 import {
-  formatTemperature,
   getLandcoverName,
   formatDate,
   formatPercentage,
   getPrimaryLandcover,
+  getLandcoverPercentages,
 } from "@/lib/locationDataUtils";
 
 interface LocationDataCardProps {
@@ -28,12 +25,18 @@ export const LocationDataCard = ({ locationData }: LocationDataCardProps) => {
     return null;
   }
 
+  // Debug: Log to console
+  console.log("LocationDataCard received data:", locationData);
+
   const worldcover = locationData.worldcover || {};
   const fireHistory = locationData.fire_history || {};
   const currentConditions = locationData.current_conditions || {};
 
   // Get primary landcover
   const primaryLandcover = getPrimaryLandcover(worldcover);
+  
+  // Get all landcover percentages
+  const landcoverPercentages = getLandcoverPercentages(worldcover);
 
   // Fire history data
   const hasFire = fireHistory.has_fire || false;
@@ -41,14 +44,11 @@ export const LocationDataCard = ({ locationData }: LocationDataCardProps) => {
   const totalFires = fireHistory.total_fires_in_period || 0;
   const firesPerYear = fireHistory.fires_per_year || 0;
 
-  // Current conditions
-  const surfaceTemp = currentConditions.surface_temperature;
-  const soilMoisture = currentConditions.soil_moisture;
-  const soilTemp = currentConditions.soil_temperature;
-  const windSpeed = currentConditions.wind_speed;
+  // Vegetation and water data (from current conditions)
   const vegetation = currentConditions.vegetation || {};
   const waterCoverage = currentConditions.water_coverage;
   const nearbyWaterCoverage = currentConditions.nearby_water_coverage;
+  const nearbyWaterDistance = currentConditions.nearby_water_distance_meters || 1000;
 
   // NDVI and EVI
   const ndvi = vegetation.NDVI?.NDVI_mean;
@@ -70,11 +70,23 @@ export const LocationDataCard = ({ locationData }: LocationDataCardProps) => {
         <div className="space-y-2">
           <div className="flex items-center gap-2">
             <TreePine className="h-4 w-4 text-muted-foreground" />
-            <h4 className="font-semibold">Landcover</h4>
+            <h4 className="font-semibold">Landcover (1km radius)</h4>
           </div>
-          <div className="pl-6">
+          <div className="pl-6 space-y-2">
             {worldcover.error ? (
               <p className="text-sm text-muted-foreground">Error: {worldcover.error}</p>
+            ) : landcoverPercentages.length > 0 ? (
+              <div className="space-y-1.5">
+                {landcoverPercentages.map((item) => (
+                  <div
+                    key={item.code}
+                    className="flex items-center justify-between text-sm"
+                  >
+                    <span className="text-muted-foreground">{item.name}:</span>
+                    <span className="font-medium">{formatPercentage(item.percentage)}</span>
+                  </div>
+                ))}
+              </div>
             ) : (
               <Badge variant="outline" className="text-sm">
                 {primaryLandcover.name}
@@ -117,60 +129,6 @@ export const LocationDataCard = ({ locationData }: LocationDataCardProps) => {
                   <span className="font-medium">{firesPerYear.toFixed(2)}</span>
                 </div>
               </>
-            )}
-          </div>
-        </div>
-
-        <Separator />
-
-        {/* Current Conditions */}
-        <div className="space-y-4">
-          <h4 className="font-semibold flex items-center gap-2">
-            <Thermometer className="h-4 w-4 text-muted-foreground" />
-            Current Conditions
-          </h4>
-          <div className="pl-6 space-y-3">
-            {/* Surface Temperature */}
-            {surfaceTemp && !surfaceTemp.error && (
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-muted-foreground">Surface Temperature:</span>
-                <span className="text-sm font-medium">
-                  {formatTemperature(surfaceTemp.AvgSurfT_inst_mean)}
-                </span>
-              </div>
-            )}
-
-            {/* Soil Temperature */}
-            {soilTemp && !soilTemp.error && (
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-muted-foreground">Soil Temperature (0-10cm):</span>
-                <span className="text-sm font-medium">
-                  {formatTemperature(soilTemp.SoilTMP0_10cm_inst_mean)}
-                </span>
-              </div>
-            )}
-
-            {/* Soil Moisture */}
-            {soilMoisture && !soilMoisture.error && (
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-muted-foreground">Soil Moisture (0-10cm):</span>
-                <span className="text-sm font-medium">
-                  {soilMoisture.SoilMoi0_10cm_inst_mean?.toFixed(2) || "N/A"} kg/m²
-                </span>
-              </div>
-            )}
-
-            {/* Wind Speed */}
-            {windSpeed && !windSpeed.error && (
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-muted-foreground flex items-center gap-1">
-                  <Wind className="h-3 w-3" />
-                  Wind Speed:
-                </span>
-                <span className="text-sm font-medium">
-                  {windSpeed.Wind_f_inst_mean?.toFixed(2) || "N/A"} m/s
-                </span>
-              </div>
             )}
           </div>
         </div>
@@ -221,7 +179,9 @@ export const LocationDataCard = ({ locationData }: LocationDataCardProps) => {
               )}
               {nearbyWaterCoverage !== null && nearbyWaterCoverage !== undefined && (
                 <div className="flex items-center justify-between">
-                  <span className="text-sm text-muted-foreground">Nearby (100m radius):</span>
+                  <span className="text-sm text-muted-foreground">
+                    Nearby ({nearbyWaterDistance}m radius):
+                  </span>
                   <span className="text-sm font-medium">
                     {formatPercentage(nearbyWaterCoverage)}
                   </span>
@@ -232,15 +192,12 @@ export const LocationDataCard = ({ locationData }: LocationDataCardProps) => {
         ) : null}
 
         {/* Error message if all data failed */}
-        {worldcover.error &&
-          fireHistory.error &&
-          (!surfaceTemp || surfaceTemp.error) &&
-          (!soilMoisture || soilMoisture.error) && (
-            <div className="flex items-center gap-2 text-sm text-destructive">
-              <AlertCircle className="h-4 w-4" />
-              <span>Unable to load location data. Please try again later.</span>
-            </div>
-          )}
+        {worldcover.error && fireHistory.error && (
+          <div className="flex items-center gap-2 text-sm text-destructive">
+            <AlertCircle className="h-4 w-4" />
+            <span>Unable to load location data. Please try again later.</span>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

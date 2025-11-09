@@ -30,6 +30,7 @@ const Index = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [report, setReport] = useState<RiskReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [formResetKey, setFormResetKey] = useState(0);
   const [mapboxToken, setMapboxToken] = useState(() => {
     // First try to get from environment variable (VITE_MAPBOX_API_KEY)
     const envToken = import.meta.env.VITE_MAPBOX_API_KEY || "";
@@ -46,22 +47,28 @@ const Index = () => {
     }
   };
 
-  const handleAddressSubmit = async (address: string, coordinates: { lat: number; lng: number }) => {
+  const handleAddressSubmit = async (address: string, coordinates: { lat: number; lng: number } | null) => {
     setIsLoading(true);
     setError(null);
     setReport(null);
 
     try {
-      const response = await fetch("https://environmental-risk-scorer.onrender.com/api/get-risk-report", {
+      // Use environment variable for API URL, fallback to localhost for development
+      const apiUrl = import.meta.env.VITE_API_URL || "http://localhost:5001";
+      
+      // Build request body - include coordinates only if available
+      const requestBody: { address: string; latitude?: number; longitude?: number } = { address };
+      if (coordinates) {
+        requestBody.latitude = coordinates.lat;
+        requestBody.longitude = coordinates.lng;
+      }
+      
+      const response = await fetch(`${apiUrl}/api/get-risk-report`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ 
-          address,
-          latitude: coordinates.lat,
-          longitude: coordinates.lng
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -70,6 +77,9 @@ const Index = () => {
 
       const data = await response.json();
       setReport(data);
+      
+      // Reset the form for the next address
+      setFormResetKey(prev => prev + 1);
       
       toast({
         title: "Risk Assessment Complete",
@@ -121,6 +131,7 @@ const Index = () => {
               mapboxToken={mapboxToken}
               onTokenChange={handleTokenChange}
               showTokenInput={!import.meta.env.VITE_MAPBOX_API_KEY}
+              resetKey={formResetKey}
             />
           </div>
 

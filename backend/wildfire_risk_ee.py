@@ -35,10 +35,14 @@ def initialize_earth_engine() -> bool:
         return False
     
     try:
-        # Check if already initialized
-        if ee.data._initialized:
+        # Check if already initialized by trying to access a simple property
+        try:
+            ee.Number(1).getInfo()
             logger.debug("Earth Engine already initialized")
             return True
+        except Exception:
+            # Not initialized, continue with initialization
+            pass
         
         # Try to initialize with service account credentials if available
         credentials_path = os.getenv("EARTH_ENGINE_CREDENTIALS")
@@ -124,6 +128,23 @@ def get_square_from_coordinates(lat: float, lon: float, size_meters: int = 10) -
     return square
 
 
+def get_radius_buffer(lat: float, lon: float, radius_meters: int = 1000) -> ee.Geometry:
+    """
+    Creates a circular buffer around given coordinates.
+    
+    Args:
+        lat: Latitude
+        lon: Longitude
+        radius_meters: Radius of the buffer in meters (default: 1000m = 1km)
+    
+    Returns:
+        ee.Geometry: A circular buffer around the point
+    """
+    center = ee.Geometry.Point([lon, lat])
+    buffer = center.buffer(radius_meters)
+    return buffer
+
+
 def get_landcover_classes() -> Dict[int, str]:
     """
     Returns a dictionary with landcover classes.
@@ -132,17 +153,17 @@ def get_landcover_classes() -> Dict[int, str]:
         dict: Mapping from class value to description
     """
     return {
-        10: "Baumbestand",
+        10: "Tree cover",
         20: "Shrubland",
-        30: "Wiese",
-        40: "Ackerland",
-        50: "Aufgebaut",
-        60: "Karge / spärliche Vegetation",
-        70: "Schnee und Eis",
-        80: "Dauerhafte Gewässer",
-        90: "Krautiges Feuchtgebiet",
-        95: "Mangroven",
-        100: "Moos und Flechten"
+        30: "Grassland",
+        40: "Cropland",
+        50: "Built-up",
+        60: "Bare / sparse vegetation",
+        70: "Snow and ice",
+        80: "Permanent water bodies",
+        90: "Herbaceous wetland",
+        95: "Mangroves",
+        100: "Moss and lichen"
     }
 
 
@@ -181,14 +202,14 @@ def extract_square_data(image: ee.Image, square: ee.Geometry) -> dict:
 
 def get_square_statistics(image: ee.Image, square: ee.Geometry) -> dict:
     """
-    Calculates statistics for the square.
+    Calculates statistics for the square/geometry and returns percentages.
     
     Args:
         image: ee.Image - The WorldCover image
-        square: ee.Geometry - The square geometry
+        square: ee.Geometry - The geometry (square, buffer, etc.)
     
     Returns:
-        dict: Dictionary with statistics
+        dict: Dictionary with histogram and percentages for each landcover class
     """
     histogram = image.select('Map').reduceRegion(
         reducer=ee.Reducer.frequencyHistogram(),
@@ -198,16 +219,34 @@ def get_square_statistics(image: ee.Image, square: ee.Geometry) -> dict:
     )
     
     stats = histogram.getInfo()
+    
+    # Calculate percentages from histogram
+    if 'Map' in stats and stats['Map']:
+        histogram_data = stats['Map']
+        total_pixels = sum(float(v) for v in histogram_data.values())
+        
+        if total_pixels > 0:
+            percentages = {}
+            for code_str, count in histogram_data.items():
+                code = int(code_str)
+                percentage = (float(count) / total_pixels) * 100.0
+                percentages[code] = round(percentage, 2)
+            
+            # Add percentages to the stats
+            stats['percentages'] = percentages
+            stats['total_pixels'] = total_pixels
+    
     return stats
 
 
-def extract_multiple_statistics(image: ee.Image, square: ee.Geometry, band_names: list, scale: float = 1000, debug: bool = False) -> dict:
+def extract_multiple_statistics(image: ee.Image, geometry: ee.Geometry, band_names: list, scale: float = 1000, debug: bool = False) -> dict:
     """
     Extracts statistics for multiple bands simultaneously (faster).
+    Uses reduceRegion for larger areas, sample for point geometries.
     
     Args:
         image: ee.Image - The image
-        square: ee.Geometry - The square geometry
+        geometry: ee.Geometry - The geometry (can be point, square, or buffer)
         band_names: list - List of band names
         scale: float - Resolution in meters
         debug: bool - If True, debug info is printed
@@ -228,26 +267,64 @@ def extract_multiple_statistics(image: ee.Image, square: ee.Geometry, band_names
             logger.warning("None of the requested bands are available!")
         return {}
     
-    # For very small geometries (like 10x10m square): Use sample() at center point
-    center = square.centroid()
+    # Check geometry type - use reduceRegion for larger areas, sample for points
+    geometry_type = geometry.type().getInfo()
     
-    sample = image.select(valid_bands).sample(
-        region=center,
-        scale=scale,
-        numPixels=1
-    )
-    
-    sample_info = sample.getInfo()
-    
-    result = {}
-    if sample_info and 'features' in sample_info and len(sample_info['features']) > 0:
-        props = sample_info['features'][0].get('properties', {})
+    if geometry_type == 'Point':
+        # For point geometries, use sample
+        sample = image.select(valid_bands).sample(
+            region=geometry,
+            scale=scale,
+            numPixels=1
+        )
+        sample_info = sample.getInfo()
+        
+        result = {}
+        if sample_info and 'features' in sample_info and len(sample_info['features']) > 0:
+            props = sample_info['features'][0].get('properties', {})
+            for band in valid_bands:
+                value = props.get(band)
+                if value is not None:
+                    result[f'{band}_mean'] = value
+                    result[f'{band}_min'] = value
+                    result[f'{band}_max'] = value
+    else:
+        # For larger geometries (buffers, rectangles), use reduceRegion for proper statistics
+        # Get mean, min, and max separately for better compatibility
+        mean_stats = image.select(valid_bands).reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=geometry,
+            scale=scale,
+            maxPixels=1e9,
+            bestEffort=True
+        )
+        
+        minmax_stats = image.select(valid_bands).reduceRegion(
+            reducer=ee.Reducer.minMax(),
+            geometry=geometry,
+            scale=scale,
+            maxPixels=1e9,
+            bestEffort=True
+        )
+        
+        mean_info = mean_stats.getInfo()
+        minmax_info = minmax_stats.getInfo()
+        
+        result = {}
         for band in valid_bands:
-            value = props.get(band)
-            if value is not None:
-                result[f'{band}_mean'] = value
-                result[f'{band}_min'] = value
-                result[f'{band}_max'] = value
+            # Get mean value
+            mean_val = mean_info.get(band)
+            if mean_val is not None:
+                result[f'{band}_mean'] = mean_val
+            
+            # Get min/max values (minMax reducer returns band_min and band_max)
+            min_val = minmax_info.get(f'{band}_min')
+            max_val = minmax_info.get(f'{band}_max')
+            
+            if min_val is not None:
+                result[f'{band}_min'] = min_val
+            if max_val is not None:
+                result[f'{band}_max'] = max_val
     
     if debug:
         logger.debug(f"Extracted stats: {result}")
@@ -310,12 +387,12 @@ def load_gldas_data(date: str = None, debug: bool = False) -> ee.Image:
     return image
 
 
-def get_all_gldas_data(square: ee.Geometry, date: str = None, debug: bool = False) -> dict:
+def get_all_gldas_data(geometry: ee.Geometry, date: str = None, debug: bool = False) -> dict:
     """
     Extracts all GLDAS data in a single query (faster).
     
     Args:
-        square: ee.Geometry - The square geometry
+        geometry: ee.Geometry - The geometry (square, buffer, etc.)
         date: str - Date in format "YYYY-MM-DD" (default: current date)
         debug: bool - If True, debug info is printed
     
@@ -344,7 +421,7 @@ def get_all_gldas_data(square: ee.Geometry, date: str = None, debug: bool = Fals
             }
         
         band_names = ['AvgSurfT_inst', 'SoilMoi0_10cm_inst', 'SoilTMP0_10cm_inst', 'Wind_f_inst']
-        all_stats = extract_multiple_statistics(image, square, band_names, scale=25000, debug=debug)
+        all_stats = extract_multiple_statistics(image, geometry, band_names, scale=25000, debug=debug)
         
         result = {
             'surface_temperature': {
@@ -397,12 +474,13 @@ def load_modis_ndvi(date: str = None) -> ee.Image:
     return get_latest_image(collection, date)
 
 
-def get_vegetation_indices(square: ee.Geometry, date: str = None, debug: bool = False) -> dict:
+def get_vegetation_indices(geometry: ee.Geometry, date: str = None, debug: bool = False) -> dict:
     """
-    Extracts vegetation indices (NDVI, EVI) for the square.
+    Extracts vegetation indices (NDVI, EVI) for the geometry.
+    Uses reduceRegion for larger areas to get proper statistics.
     
     Args:
-        square: ee.Geometry - The square geometry
+        geometry: ee.Geometry - The geometry (square, buffer, etc.)
         date: str - Date in format "YYYY-MM-DD" (default: current date)
         debug: bool - If True, debug info is printed
     
@@ -414,25 +492,44 @@ def get_vegetation_indices(square: ee.Geometry, date: str = None, debug: bool = 
     
     try:
         image = load_modis_ndvi(date)
-        center = square.centroid()
-        sample = image.select(['NDVI', 'EVI']).sample(
-            region=center,
-            scale=500,
-            numPixels=1
-        )
-        sample_info = sample.getInfo()
         
+        # Use reduceRegion for proper statistics over the area
+        # Get mean, min, and max separately
+        mean_stats = image.select(['NDVI', 'EVI']).reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=geometry,
+            scale=500,  # MODIS resolution
+            maxPixels=1e9,
+            bestEffort=True
+        )
+        
+        minmax_stats = image.select(['NDVI', 'EVI']).reduceRegion(
+            reducer=ee.Reducer.minMax(),
+            geometry=geometry,
+            scale=500,
+            maxPixels=1e9,
+            bestEffort=True
+        )
+        
+        mean_info = mean_stats.getInfo()
+        minmax_info = minmax_stats.getInfo()
         all_stats = {}
-        if sample_info and 'features' in sample_info and len(sample_info['features']) > 0:
-            props = sample_info['features'][0].get('properties', {})
-            for band in ['NDVI', 'EVI']:
-                value = props.get(band)
-                if value is not None:
-                    # MODIS NDVI/EVI are scaled (0-10000), divide by 10000
-                    scaled_value = value / 10000.0 if value > 1 else value
-                    all_stats[f'{band}_mean'] = scaled_value
-                    all_stats[f'{band}_min'] = scaled_value
-                    all_stats[f'{band}_max'] = scaled_value
+        
+        for band in ['NDVI', 'EVI']:
+            # MODIS values are scaled (0-10000), divide by 10000
+            mean_val = mean_info.get(band)
+            min_val = minmax_info.get(f'{band}_min')
+            max_val = minmax_info.get(f'{band}_max')
+            
+            if mean_val is not None:
+                scaled_mean = mean_val / 10000.0 if mean_val > 1 else mean_val
+                all_stats[f'{band}_mean'] = scaled_mean
+            if min_val is not None:
+                scaled_min = min_val / 10000.0 if min_val > 1 else min_val
+                all_stats[f'{band}_min'] = scaled_min
+            if max_val is not None:
+                scaled_max = max_val / 10000.0 if max_val > 1 else max_val
+                all_stats[f'{band}_max'] = scaled_max
         
         result = {
             'NDVI': {
@@ -454,13 +551,13 @@ def get_vegetation_indices(square: ee.Geometry, date: str = None, debug: bool = 
         return {'NDVI': {'error': str(e)}, 'EVI': {'error': str(e)}}
 
 
-def get_historical_fires(square: ee.Geometry, start_date: str = None, end_date: str = None, debug: bool = False) -> dict:
+def get_historical_fires(geometry: ee.Geometry, start_date: str = None, end_date: str = None, debug: bool = False) -> dict:
     """
-    Checks if there was ever a wildfire in the past in this pixel.
+    Checks if there was ever a wildfire in the past in the area.
     FIRMS is an ImageCollection, not FeatureCollection!
     
     Args:
-        square: ee.Geometry - The square geometry
+        geometry: ee.Geometry - The geometry (square, buffer, etc.)
         start_date: str - Start date in format "YYYY-MM-DD" (default: 10 years ago)
         end_date: str - End date in format "YYYY-MM-DD" (default: current date)
         debug: bool - If True, debug info is printed
@@ -477,9 +574,20 @@ def get_historical_fires(square: ee.Geometry, start_date: str = None, end_date: 
         firms = ee.ImageCollection('FIRMS')
         filtered = firms.filterDate(start_date, end_date)
         
-        center = square.centroid()
+        center = geometry.centroid()
         fires_mosaic = filtered.select('T21').mosaic()
         
+        # Check if there's a fire in the geometry area
+        fire_mask = fires_mosaic.gt(0)
+        fire_count = fire_mask.reduceRegion(
+            reducer=ee.Reducer.sum(),
+            geometry=geometry,
+            scale=1000,
+            maxPixels=1e9,
+            bestEffort=True
+        )
+        
+        # Also check center point for has_fire flag
         fire_sample = fires_mosaic.sample(
             region=center,
             scale=1000,
@@ -494,15 +602,6 @@ def get_historical_fires(square: ee.Geometry, start_date: str = None, end_date: 
             props = fire_sample_info['features'][0].get('properties', {})
             fire_value = props.get('T21')
             has_fire = fire_value is not None and fire_value > 0
-        
-        fire_mask = fires_mosaic.gt(0)
-        fire_count = fire_mask.reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=center.buffer(500),
-            scale=1000,
-            maxPixels=1e9,
-            bestEffort=True
-        )
         
         count_value = fire_count.getInfo().get('T21', 0)
         
@@ -553,21 +652,34 @@ def get_historical_fires(square: ee.Geometry, start_date: str = None, end_date: 
 
 def load_water_mask() -> ee.Image:
     """
-    Loads GLCF water mask.
+    Loads water mask using JRC Global Surface Water dataset (more comprehensive than GLCF).
+    Falls back to GLCF if JRC is not available.
     
     Returns:
         ee.Image: The water mask image
     """
-    collection = ee.ImageCollection("GLCF/GLS_WATER")
-    return collection.first()
+    try:
+        # Try JRC Global Surface Water first (more comprehensive, includes permanent and seasonal water)
+        # Use the occurrence band which shows where water was detected at least once
+        jrc_collection = ee.ImageCollection("JRC/GSW1_4/GlobalSurfaceWater")
+        jrc_image = jrc_collection.select('occurrence').mosaic()
+        # Create binary mask: occurrence > 0 means water was detected
+        jrc_water = jrc_image.gt(0).rename('water')
+        return jrc_water
+    except Exception as e:
+        logger.warning(f"JRC water dataset not available, falling back to GLCF: {e}")
+        # Fallback to GLCF
+        collection = ee.ImageCollection("GLCF/GLS_WATER")
+        return collection.first()
 
 
-def get_water_bodies(square: ee.Geometry, debug: bool = False) -> dict:
+def get_water_bodies(geometry: ee.Geometry, debug: bool = False) -> dict:
     """
-    Extracts water body information for the square.
+    Extracts water body information for the geometry.
+    Uses the geometry area for water coverage, and extends buffer for nearby detection.
     
     Args:
-        square: ee.Geometry - The square geometry
+        geometry: ee.Geometry - The geometry (square, buffer, etc.)
         debug: bool - If True, debug info is printed
     
     Returns:
@@ -576,9 +688,10 @@ def get_water_bodies(square: ee.Geometry, debug: bool = False) -> dict:
     try:
         image = load_water_mask()
         
+        # Check water coverage in the geometry area itself
         water_stats = image.select('water').reduceRegion(
             reducer=ee.Reducer.frequencyHistogram(),
-            geometry=square,
+            geometry=geometry,
             scale=30,
             maxPixels=1e9,
             bestEffort=True
@@ -590,16 +703,20 @@ def get_water_bodies(square: ee.Geometry, debug: bool = False) -> dict:
         if 'water' in stats and stats['water']:
             histogram = stats['water']
             total_pixels = sum(float(v) for v in histogram.values())
+            # For JRC, water pixels are 1; for GLCF, also 1
             water_pixels = histogram.get('1', 0)
             if total_pixels > 0:
                 water_coverage = (float(water_pixels) / total_pixels) * 100.0
         
-        center = square.centroid()
-        buffer = center.buffer(100)
+        center = geometry.centroid()
+        
+        # For nearby water, extend the buffer by 1km from the geometry edge
+        # If geometry is already 1km, this gives us 2km total radius
+        buffer_1000m = center.buffer(1000)
         
         nearby_water_stats = image.select('water').reduceRegion(
             reducer=ee.Reducer.frequencyHistogram(),
-            geometry=buffer,
+            geometry=buffer_1000m,
             scale=30,
             maxPixels=1e9,
             bestEffort=True
@@ -607,6 +724,8 @@ def get_water_bodies(square: ee.Geometry, debug: bool = False) -> dict:
         
         nearby_stats = nearby_water_stats.getInfo()
         nearby_water_coverage = 0.0
+        nearby_water_distance = 1000  # Default to 1000m radius
+        
         if 'water' in nearby_stats and nearby_stats['water']:
             histogram = nearby_stats['water']
             total_pixels = sum(float(v) for v in histogram.values())
@@ -614,21 +733,27 @@ def get_water_bodies(square: ee.Geometry, debug: bool = False) -> dict:
             if total_pixels > 0:
                 nearby_water_coverage = (float(water_pixels) / total_pixels) * 100.0
         
+        if debug:
+            logger.debug(f"Water coverage: {water_coverage}% in area, {nearby_water_coverage}% nearby (within {nearby_water_distance}m)")
+        
         result = {
             'water_coverage_percent': water_coverage,
-            'nearby_water_coverage_percent': nearby_water_coverage
+            'nearby_water_coverage_percent': nearby_water_coverage,
+            'nearby_water_distance_meters': nearby_water_distance
         }
         
         return result
     except Exception as e:
         if debug:
             logger.warning(f"Error extracting water data: {e}")
+            logger.debug(traceback.format_exc())
         return {'error': str(e)}
 
 
 def extract_all_risk_data(lat: float, lon: float, date: str = None, fire_history_start: str = None, debug: bool = False) -> dict:
     """
     Collects all wildfire risk data for the location.
+    Uses a 1km radius area around the location for data collection.
     
     Args:
         lat: Latitude
@@ -645,13 +770,16 @@ def extract_all_risk_data(lat: float, lon: float, date: str = None, fire_history
     if fire_history_start is None:
         fire_history_start = (datetime.now() - timedelta(days=3650)).strftime("%Y-%m-%d")
     
+    # Create both a small square for exact location and 1km radius buffer for area statistics
     square = get_square_from_coordinates(lat, lon, size_meters=10)
+    area_1km = get_radius_buffer(lat, lon, radius_meters=1000)
     
     all_data = {
         "square_info": {
             "center_lon": lon,
             "center_lat": lat,
             "size_meters": 10,
+            "area_radius_meters": 1000,
             "date": date
         },
         "worldcover": {},
@@ -659,11 +787,13 @@ def extract_all_risk_data(lat: float, lon: float, date: str = None, fire_history
         "current_conditions": {}
     }
     
-    # WorldCover data
+    # WorldCover data - use 1km area for statistics
     try:
         worldcover = load_worldcover()
+        # Still get features from exact location for reference
         features = extract_square_data(worldcover, square)
-        stats = get_square_statistics(worldcover, square)
+        # But use 1km area for statistics
+        stats = get_square_statistics(worldcover, area_1km)
         all_data["worldcover"] = {
             "features": features,
             "statistics": stats
@@ -672,9 +802,9 @@ def extract_all_risk_data(lat: float, lon: float, date: str = None, fire_history
         logger.warning(f"Error extracting WorldCover data: {e}")
         all_data["worldcover"] = {"error": str(e)}
     
-    # Historical fires
+    # Historical fires - use 1km area
     try:
-        fire_data = get_historical_fires(square, fire_history_start, date, debug=debug)
+        fire_data = get_historical_fires(area_1km, fire_history_start, date, debug=debug)
         all_data["fire_history"] = fire_data
     except Exception as e:
         logger.warning(f"Error extracting fire history: {e}")
@@ -683,9 +813,9 @@ def extract_all_risk_data(lat: float, lon: float, date: str = None, fire_history
     # Current conditions
     current_conditions = {}
     
-    # GLDAS data
+    # GLDAS data - use 1km area
     try:
-        gldas_data = get_all_gldas_data(square, date, debug=debug)
+        gldas_data = get_all_gldas_data(area_1km, date, debug=debug)
         current_conditions["surface_temperature"] = gldas_data["surface_temperature"]
         current_conditions["soil_moisture"] = gldas_data["soil_moisture"]
         current_conditions["soil_temperature"] = gldas_data["soil_temperature"]
@@ -697,58 +827,44 @@ def extract_all_risk_data(lat: float, lon: float, date: str = None, fire_history
         current_conditions["soil_temperature"] = {"error": str(e)}
         current_conditions["wind_speed"] = {"error": str(e)}
     
-    # Vegetation indices
+    # Vegetation indices - use 1km area
     try:
-        vegetation = get_vegetation_indices(square, date, debug=debug)
+        vegetation = get_vegetation_indices(area_1km, date, debug=debug)
         current_conditions["vegetation"] = vegetation
     except Exception as e:
         logger.warning(f"Error extracting vegetation indices: {e}")
         current_conditions["vegetation"] = {"error": str(e)}
     
-    # Water bodies
+    # Water bodies - use 1km area
     try:
-        water = get_water_bodies(square, debug=debug)
+        water = get_water_bodies(area_1km, debug=debug)
         current_conditions["water_coverage"] = water.get("water_coverage_percent")
         current_conditions["nearby_water_coverage"] = water.get("nearby_water_coverage_percent")
+        current_conditions["nearby_water_distance_meters"] = water.get("nearby_water_distance_meters")
     except Exception as e:
         logger.warning(f"Error extracting water data: {e}")
         current_conditions["water_coverage"] = None
         current_conditions["nearby_water_coverage"] = None
+        current_conditions["nearby_water_distance_meters"] = None
     
     all_data["current_conditions"] = current_conditions
     
     return all_data
 
 
-def calculate_wildfire_risk_ee(lat: float, lon: float, timeout_seconds: int = 30) -> Optional[Dict]:
+def _calculate_risk_from_location_data(location_data: dict) -> Optional[Dict]:
     """
-    Calculate wildfire risk using Google Earth Engine data.
-    Maintains backward compatibility with existing code.
+    Calculate wildfire risk score from existing location data.
+    This is an internal helper function to avoid duplicate data extraction.
     
     Args:
-        lat: Latitude
-        lon: Longitude
-        timeout_seconds: Maximum time to wait for Earth Engine operations (not used, kept for compatibility)
+        location_data: Dictionary from extract_all_risk_data
         
     Returns:
         Dictionary with 'score' (0-10), 'explanation', and 'data_sources' keys,
         or None if calculation fails
     """
-    if not EE_AVAILABLE:
-        logger.warning("Earth Engine API not available")
-        return None
-    
-    # Initialize Earth Engine
-    if not initialize_earth_engine():
-        logger.warning("Failed to initialize Earth Engine")
-        return None
-    
     try:
-        logger.info(f"Calculating wildfire risk for coordinates: ({lat}, {lon})")
-        
-        # Get all location data
-        location_data = extract_all_risk_data(lat, lon, debug=False)
-        
         # Extract relevant data for risk calculation
         fire_history = location_data.get("fire_history", {})
         current_conditions = location_data.get("current_conditions", {})
@@ -857,6 +973,46 @@ def calculate_wildfire_risk_ee(lat: float, lon: float, timeout_seconds: int = 30
                 "elevation": None
             }
         }
+        
+    except Exception as e:
+        logger.error(f"Error calculating wildfire risk from location data: {e}")
+        logger.debug(traceback.format_exc())
+        return None
+
+
+def calculate_wildfire_risk_ee(lat: float, lon: float, timeout_seconds: int = 30, location_data: Optional[Dict] = None) -> Optional[Dict]:
+    """
+    Calculate wildfire risk using Google Earth Engine data.
+    Maintains backward compatibility with existing code.
+    
+    Args:
+        lat: Latitude
+        lon: Longitude
+        timeout_seconds: Maximum time to wait for Earth Engine operations (not used, kept for compatibility)
+        location_data: Optional pre-extracted location data to avoid duplicate extraction
+        
+    Returns:
+        Dictionary with 'score' (0-10), 'explanation', and 'data_sources' keys,
+        or None if calculation fails
+    """
+    if not EE_AVAILABLE:
+        logger.warning("Earth Engine API not available")
+        return None
+    
+    # Initialize Earth Engine
+    if not initialize_earth_engine():
+        logger.warning("Failed to initialize Earth Engine")
+        return None
+    
+    try:
+        logger.info(f"Calculating wildfire risk for coordinates: ({lat}, {lon})")
+        
+        # Use provided location_data if available, otherwise extract it
+        if location_data is None:
+            location_data = extract_all_risk_data(lat, lon, debug=False)
+        
+        # Calculate risk from location data using helper function
+        return _calculate_risk_from_location_data(location_data)
         
     except Exception as e:
         logger.error(f"Error calculating wildfire risk with Earth Engine: {e}")
