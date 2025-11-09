@@ -12,7 +12,7 @@ const getDecisionConfig = (decision: string) => {
     return {
       icon: CheckCircle,
       label: "Approved",
-      variant: "success" as const,
+      variant: "default" as const,
     };
   }
   
@@ -20,14 +20,14 @@ const getDecisionConfig = (decision: string) => {
     return {
       icon: XCircle,
       label: "Denied",
-      variant: "danger" as const,
+      variant: "destructive" as const,
     };
   }
   
   return {
     icon: AlertTriangle,
     label: "Flag for Review",
-    variant: "warning" as const,
+    variant: "secondary" as const,
   };
 };
 
