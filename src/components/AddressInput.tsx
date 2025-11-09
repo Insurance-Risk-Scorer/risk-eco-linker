@@ -5,11 +5,12 @@ import { MapPin, Loader2, Key } from "lucide-react";
 import { Card } from "@/components/ui/card";
 
 interface AddressInputProps {
-  onSubmit: (address: string, coordinates: { lat: number; lng: number }) => void;
+  onSubmit: (address: string, coordinates: { lat: number; lng: number } | null) => void;
   isLoading: boolean;
   mapboxToken: string;
   onTokenChange: (token: string) => void;
   showTokenInput?: boolean;
+  resetKey?: number; // Key to reset the form when changed
 }
 
 interface MapboxFeature {
@@ -18,12 +19,22 @@ interface MapboxFeature {
   center: [number, number];
 }
 
-export const AddressInput = ({ onSubmit, isLoading, mapboxToken, onTokenChange, showTokenInput = true }: AddressInputProps) => {
+export const AddressInput = ({ onSubmit, isLoading, mapboxToken, onTokenChange, showTokenInput = true, resetKey }: AddressInputProps) => {
   const [address, setAddress] = useState("");
   const [suggestions, setSuggestions] = useState<MapboxFeature[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedCoordinates, setSelectedCoordinates] = useState<{ lat: number; lng: number } | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
+
+  // Reset form when resetKey changes
+  useEffect(() => {
+    if (resetKey !== undefined && resetKey > 0) {
+      setAddress("");
+      setSelectedCoordinates(null);
+      setSuggestions([]);
+      setShowSuggestions(false);
+    }
+  }, [resetKey]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -39,6 +50,7 @@ export const AddressInput = ({ onSubmit, isLoading, mapboxToken, onTokenChange, 
     const fetchSuggestions = async () => {
       if (!address.trim() || !mapboxToken || address.length < 3) {
         setSuggestions([]);
+        setShowSuggestions(false);
         return;
       }
 
@@ -49,11 +61,17 @@ export const AddressInput = ({ onSubmit, isLoading, mapboxToken, onTokenChange, 
         
         if (response.ok) {
           const data = await response.json();
-          setSuggestions(data.features || []);
-          setShowSuggestions(true);
+          const features = data.features || [];
+          setSuggestions(features);
+          setShowSuggestions(features.length > 0);
+        } else {
+          setSuggestions([]);
+          setShowSuggestions(false);
         }
       } catch (error) {
         console.error("Error fetching suggestions:", error);
+        setSuggestions([]);
+        setShowSuggestions(false);
       }
     };
 
@@ -63,7 +81,7 @@ export const AddressInput = ({ onSubmit, isLoading, mapboxToken, onTokenChange, 
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (address.trim() && selectedCoordinates) {
+    if (address.trim()) {
       onSubmit(address.trim(), selectedCoordinates);
       setShowSuggestions(false);
     }
@@ -116,19 +134,24 @@ export const AddressInput = ({ onSubmit, isLoading, mapboxToken, onTokenChange, 
             setAddress(e.target.value);
             setSelectedCoordinates(null);
           }}
+          onFocus={() => {
+            if (suggestions.length > 0) {
+              setShowSuggestions(true);
+            }
+          }}
           disabled={isLoading}
           className="pl-11 h-14 text-lg"
         />
         
         {showSuggestions && suggestions.length > 0 && (
-          <Card className="absolute z-50 w-full mt-1 max-h-80 overflow-auto">
+          <Card className="absolute z-50 w-full mt-1 max-h-80 overflow-auto shadow-lg border">
             <div className="py-2">
               {suggestions.map((feature) => (
                 <button
                   key={feature.id}
                   type="button"
                   onClick={() => handleSelectSuggestion(feature)}
-                  className="w-full px-4 py-3 text-left hover:bg-muted transition-colors flex items-start gap-3"
+                  className="w-full px-4 py-3 text-left hover:bg-muted transition-colors flex items-start gap-3 focus:bg-muted focus:outline-none"
                 >
                   <MapPin className="h-4 w-4 text-muted-foreground mt-1 flex-shrink-0" />
                   <span className="text-sm text-foreground">{feature.place_name}</span>
@@ -141,7 +164,7 @@ export const AddressInput = ({ onSubmit, isLoading, mapboxToken, onTokenChange, 
       
       <Button
         type="submit"
-        disabled={!address.trim() || !selectedCoordinates || isLoading}
+        disabled={!address.trim() || isLoading}
         className="w-full h-12 text-base"
         size="lg"
       >

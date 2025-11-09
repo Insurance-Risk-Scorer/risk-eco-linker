@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Import Earth Engine wildfire risk module
 try:
-    from wildfire_risk_ee import calculate_wildfire_risk_ee, extract_all_risk_data
+    from wildfire_risk_ee import calculate_wildfire_risk_ee, extract_all_risk_data, initialize_earth_engine
     EE_WILDFIRE_AVAILABLE = True
 except ImportError:
     EE_WILDFIRE_AVAILABLE = False
@@ -294,30 +294,43 @@ def handle_risk_report():
                 return jsonify({"error": "An unknown geocoding error occurred.", "details": str(e)}), 500
 
         # --- Get Earth Engine Wildfire Risk and Location Data (if available) ---
+        # OPTIMIZATION: Extract location data once and reuse for both wildfire risk and location_data
         wildfire_risk_ee = None
         location_data = None
-        if EE_WILDFIRE_AVAILABLE:
-            try:
-                logger.info(f"Attempting Earth Engine wildfire risk calculation for ({lat}, {lon})")
-                wildfire_risk_ee = calculate_wildfire_risk_ee(lat, lon)
-                if wildfire_risk_ee:
-                    logger.info(f"Earth Engine wildfire risk calculated: {wildfire_risk_ee.get('score')}/10")
-                else:
-                    logger.warning("Earth Engine wildfire risk calculation returned None, falling back to AI")
-            except Exception as e:
-                logger.warning(f"Earth Engine wildfire risk calculation failed: {e}")
-                logger.debug(traceback.format_exc())
-                wildfire_risk_ee = None
-            
-            # Get detailed location data (WorldCover, fires, conditions, etc.)
-            try:
-                logger.info(f"Fetching detailed location data for ({lat}, {lon})")
-                location_data = extract_all_risk_data(lat, lon, debug=False)
-                logger.info("Location data fetched successfully")
-            except Exception as e:
-                logger.warning(f"Failed to fetch location data: {e}")
-                logger.debug(traceback.format_exc())
-                location_data = None
+        
+        if not EE_WILDFIRE_AVAILABLE:
+            logger.warning("Earth Engine wildfire risk module not available - location_data will not be included")
+        else:
+            # Initialize Earth Engine first (needed for both wildfire risk and location data)
+            if not initialize_earth_engine():
+                logger.warning("Failed to initialize Earth Engine - location_data will not be included")
+            else:
+                # Extract location data once (this is the expensive operation)
+                try:
+                    logger.info(f"Fetching detailed location data for ({lat}, {lon})")
+                    location_data = extract_all_risk_data(lat, lon, debug=False)
+                    if location_data:
+                        logger.info(f"Location data fetched successfully. Keys: {list(location_data.keys())}")
+                    else:
+                        logger.warning("extract_all_risk_data returned None")
+                except Exception as e:
+                    logger.error(f"Failed to fetch location data: {e}")
+                    logger.error(traceback.format_exc())
+                    location_data = None
+                
+                # Calculate wildfire risk using the already-extracted location data
+                if location_data:
+                    try:
+                        logger.info(f"Calculating wildfire risk from location data for ({lat}, {lon})")
+                        wildfire_risk_ee = calculate_wildfire_risk_ee(lat, lon, location_data=location_data)
+                        if wildfire_risk_ee:
+                            logger.info(f"Earth Engine wildfire risk calculated: {wildfire_risk_ee.get('score')}/10")
+                        else:
+                            logger.warning("Earth Engine wildfire risk calculation returned None, falling back to AI")
+                    except Exception as e:
+                        logger.warning(f"Earth Engine wildfire risk calculation failed: {e}")
+                        logger.debug(traceback.format_exc())
+                        wildfire_risk_ee = None
         
         # --- Get AI Report ---
         logger.info(f"Calling get_ai_risk_report for address: {address}, lat: {lat}, lon: {lon}")
@@ -355,7 +368,9 @@ def handle_risk_report():
         # Add location data to response if available
         if location_data:
             report["location_data"] = location_data
-            logger.info("Location data added to response")
+            logger.info(f"Location data added to response with keys: {list(location_data.keys())}")
+        else:
+            logger.warning("No location_data to add to response - this may be because Earth Engine is not available or an error occurred")
         
         logger.info("Returning successful response")
         logger.debug(f"Response structure: {json.dumps({k: type(v).__name__ for k, v in report.items()}, indent=2)}")
