@@ -1,8 +1,22 @@
 {
-  "name": "vite_react_shadcn_ts",
+  "name": "environmental-risk-scorer",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "description": "AI-powered property risk assessment platform for insurance underwriters",
   "type": "module",
+  "engines": {
+    "node": "20.x"
+  },
+  "keywords": [
+    "risk-assessment",
+    "insurance",
+    "environmental-risk",
+    "wildfire",
+    "flood",
+    "ai",
+    "react",
+    "typescript"
+  ],
   "scripts": {
     "dev": "vite",
     "build": "vite build",

@@ -1,73 +1,228 @@
-# Welcome to your Lovable project
+# Environmental Risk Scorer
 
-## Project info
+A professional property risk assessment platform for insurance underwriters. Get comprehensive flood, wildfire, storm, and drought risk analysis powered by AI and Google Earth Engine.
 
-**URL**: https://lovable.dev/projects/8be787df-f014-453d-95bd-255980bf7e3f
+## Features
 
-## How can I edit this code?
+- **AI-Powered Risk Assessment**: Comprehensive analysis of environmental risks using Google Gemini AI
+- **Multi-Hazard Analysis**: Evaluate flood, wildfire, storm, and drought risks
+- **Google Earth Engine Integration**: Advanced wildfire risk calculations using satellite data
+- **Interactive Maps**: Visualize property locations and risk factors
+- **Automated Decision Support**: AI-generated recommendations for insurance underwriting
+- **Modern UI**: Built with React, TypeScript, and shadcn/ui components
 
-There are several ways of editing your application.
+## Tech Stack
 
-**Use Lovable**
+### Frontend
+- **React 18** with TypeScript
+- **Vite** for build tooling
+- **React Router** for navigation
+- **TanStack Query** for data fetching
+- **Tailwind CSS** for styling
+- **shadcn/ui** for UI components
+- **Recharts** for data visualization
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/8be787df-f014-453d-95bd-255980bf7e3f) and start prompting.
+### Backend
+- **Flask** (Python) REST API
+- **Google Gemini AI** for risk analysis
+- **Google Earth Engine** for wildfire risk calculations
+- **Geopy** for geocoding
 
-Changes made via Lovable will be committed automatically to this repo.
+## Prerequisites
 
-**Use your preferred IDE**
+- **Node.js** 20.x or higher
+- **Python** 3.13 or higher
+- **npm** or **bun** package manager
+- **Google Gemini API Key** (for AI risk analysis)
+- **Mapbox API Key** (optional, for enhanced map features)
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
+## Setup Instructions
 
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
+### Frontend Setup
 
-Follow these steps:
-
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
-npm run dev
+1. Install dependencies:
+```bash
+npm install
+# or
+bun install
 ```
 
-**Edit a file directly in GitHub**
+2. Create a `.env` file in the root directory (optional):
+```env
+VITE_MAPBOX_API_KEY=your_mapbox_api_key_here
+```
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+3. Start the development server:
+```bash
+npm run dev
+# or
+bun dev
+```
 
-**Use GitHub Codespaces**
+The frontend will be available at `http://localhost:8080`
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+### Backend Setup
 
-## What technologies are used for this project?
+1. Navigate to the backend directory:
+```bash
+cd backend
+```
 
-This project is built with:
+2. Create a virtual environment:
+```bash
+python -m venv venv
+```
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+3. Activate the virtual environment:
+```bash
+# On Linux/macOS:
+source venv/bin/activate
 
-## How can I deploy this project?
+# On Windows:
+venv\Scripts\activate
+```
 
-Simply open [Lovable](https://lovable.dev/projects/8be787df-f014-453d-95bd-255980bf7e3f) and click on Share -> Publish.
+4. Install Python dependencies:
+```bash
+pip install -r requirements.txt
+```
 
-## Can I connect a custom domain to my Lovable project?
+5. Create a `.env` file in the `backend` directory:
+```env
+GEMINI_API_KEY=your_gemini_api_key_here
+```
 
-Yes, you can!
+6. Start the Flask server:
+```bash
+python app.py
+```
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
+The backend API will be available at `http://localhost:5001`
 
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+## Building for Production
+
+### Frontend
+
+Build the production bundle:
+```bash
+npm run build
+# or
+bun run build
+```
+
+The built files will be in the `dist/` directory.
+
+Preview the production build:
+```bash
+npm run preview
+# or
+bun run preview
+```
+
+### Backend
+
+The backend is ready for deployment. For production, use a WSGI server like Gunicorn:
+```bash
+gunicorn app:app --bind 0.0.0.0:5001
+```
+
+## Project Structure
+
+```
+environmental-risk-scorer/
+├── backend/              # Flask API server
+│   ├── app.py           # Main Flask application
+│   ├── wildfire_risk_ee.py  # Earth Engine integration
+│   └── requirements.txt # Python dependencies
+├── src/                 # React frontend source
+│   ├── components/      # React components
+│   ├── pages/           # Page components
+│   ├── hooks/           # Custom React hooks
+│   └── lib/             # Utility functions
+├── public/              # Static assets
+├── dist/                # Production build output (generated)
+└── vite.config.ts       # Vite configuration
+```
+
+## API Endpoints
+
+### POST `/api/get-risk-report`
+
+Generate a comprehensive risk assessment for a property.
+
+**Request Body:**
+```json
+{
+  "address": "123 Main St, City, State, ZIP",
+  "latitude": 37.7749,
+  "longitude": -122.4194
+}
+```
+
+**Response:**
+```json
+{
+  "overall_summary": "...",
+  "automated_decision": "APPROVE|REJECT|REVIEW",
+  "flood_risk": {...},
+  "wildfire_risk": {...},
+  "storm_risk": {...},
+  "drought_risk": {...}
+}
+```
+
+## Environment Variables
+
+### Frontend
+- `VITE_MAPBOX_API_KEY` (optional): Mapbox API key for enhanced map features
+
+### Backend
+- `GEMINI_API_KEY` (required): Google Gemini API key for AI risk analysis
+
+## Development
+
+### Running Linter
+
+```bash
+npm run lint
+```
+
+### Development Mode
+
+The frontend development server includes a proxy configuration that forwards `/api` requests to the backend. In production, the frontend makes direct API calls to the configured backend URL.
+
+## Deployment
+
+### Frontend Deployment
+
+The frontend can be deployed to any static hosting service:
+- **Vercel**: Connect your repository and deploy
+- **Netlify**: Connect your repository and set build command to `npm run build`
+- **GitHub Pages**: Use GitHub Actions to build and deploy
+- **Cloudflare Pages**: Connect repository and set build command
+
+### Backend Deployment
+
+The backend can be deployed to:
+- **Render**: Connect repository and set start command to `gunicorn app:app`
+- **Heroku**: Use the Procfile with `web: gunicorn app:app`
+- **AWS Elastic Beanstalk**: Configure for Python/Flask
+- **Google Cloud Run**: Containerize and deploy
+
+**Note**: Ensure environment variables are set in your deployment platform.
+
+## License
+
+See [LICENSE](LICENSE) file for details.
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## Support
+
+For issues and questions, please open an issue on the GitHub repository.
