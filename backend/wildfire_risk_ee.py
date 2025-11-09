@@ -3,11 +3,15 @@ Google Earth Engine-based wildfire risk calculation module.
 
 This module uses Earth Engine datasets to calculate data-driven wildfire risk
 scores based on satellite imagery, climate data, and historical fire records.
+Adapted from get_worldcover_data.py with working implementations.
 """
 
 import os
 import logging
 import traceback
+import pathlib
+import time
+import math
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 
@@ -19,10 +23,6 @@ try:
     EE_AVAILABLE = True
 except ImportError:
     EE_AVAILABLE = False
-    # Create a dummy class for type hints when ee is not available
-    class ee:
-        class Geometry:
-            pass
     logger.warning("Earth Engine API not available. Install with: pip install earthengine-api")
 
 
@@ -42,14 +42,43 @@ def initialize_earth_engine() -> bool:
         
         # Try to initialize with service account credentials if available
         credentials_path = os.getenv("EARTH_ENGINE_CREDENTIALS")
-        if credentials_path and os.path.exists(credentials_path):
-            logger.info(f"Initializing Earth Engine with service account: {credentials_path}")
-            credentials = ee.ServiceAccountCredentials(None, credentials_path)
-            ee.Initialize(credentials)
+        if credentials_path:
+            # Resolve path relative to root directory if not absolute
+            if not os.path.isabs(credentials_path):
+                root_dir = pathlib.Path(__file__).parent.parent
+                credentials_path = str(root_dir / credentials_path)
+            
+            if os.path.exists(credentials_path):
+                logger.info(f"Initializing Earth Engine with service account: {credentials_path}")
+                credentials = ee.ServiceAccountCredentials(None, credentials_path)
+                ee.Initialize(credentials)
+            else:
+                logger.warning(f"Earth Engine credentials file not found: {credentials_path}, falling back to default auth")
+                ee.Initialize()
         else:
             # Try to initialize with default credentials (user auth)
-            logger.info("Initializing Earth Engine with default credentials")
-            ee.Initialize()
+            # Also check for credentials.json in root directory
+            root_dir = pathlib.Path(__file__).parent.parent
+            credentials_path = root_dir / "credentials.json"
+            if credentials_path.exists():
+                try:
+                    import json
+                    with open(credentials_path, 'r') as f:
+                        creds = json.load(f)
+                        project_id = creds.get('project_id')
+                    
+                    credentials = ee.ServiceAccountCredentials(None, str(credentials_path))
+                    if project_id:
+                        ee.Initialize(credentials, project=project_id)
+                    else:
+                        ee.Initialize(credentials)
+                    logger.info("Earth Engine initialized with credentials.json")
+                except Exception as e:
+                    logger.warning(f"Failed to initialize with credentials.json: {e}, trying default auth")
+                    ee.Initialize()
+            else:
+                logger.info("Initializing Earth Engine with default credentials")
+                ee.Initialize()
         
         logger.info("Earth Engine initialized successfully")
         return True
@@ -59,399 +88,647 @@ def initialize_earth_engine() -> bool:
         return False
 
 
-def get_ndvi_data(point: ee.Geometry, buffer_km: float = 5.0) -> Optional[float]:
+def get_square_from_coordinates(lat: float, lon: float, size_meters: int = 10) -> ee.Geometry:
     """
-    Extract NDVI (Normalized Difference Vegetation Index) data.
-    Higher NDVI indicates more vegetation/fuel load.
+    Creates a square geometry around given coordinates.
     
     Args:
-        point: Earth Engine Geometry point
-        buffer_km: Buffer radius in kilometers
-        
+        lat: Latitude
+        lon: Longitude
+        size_meters: Size of the square in meters (default: 10m)
+    
     Returns:
-        Average NDVI value (0-1) or None if extraction fails
+        ee.Geometry.Rectangle: A square as Rectangle
     """
+    center = ee.Geometry.Point([lon, lat])
+    
+    # Convert meters to degrees (approximately)
+    # 1 degree ≈ 111,320 meters (at equator)
+    # At latitude lat: 1 degree longitude ≈ 111,320 * cos(lat) meters
+    meters_per_degree_lat = 111320  # Latitude is constant
+    lat_rad = math.radians(lat)
+    meters_per_degree_lon = 111320 * math.cos(lat_rad)
+    
+    # Half size in degrees
+    half_size_lat = (size_meters / 2) / meters_per_degree_lat
+    half_size_lon = (size_meters / 2) / meters_per_degree_lon
+    
+    # Create Rectangle around the center point
+    square = ee.Geometry.Rectangle([
+        lon - half_size_lon,  # West
+        lat - half_size_lat,  # South
+        lon + half_size_lon,  # East
+        lat + half_size_lat   # North
+    ])
+    
+    return square
+
+
+def get_landcover_classes() -> Dict[int, str]:
+    """
+    Returns a dictionary with landcover classes.
+    
+    Returns:
+        dict: Mapping from class value to description
+    """
+    return {
+        10: "Baumbestand",
+        20: "Shrubland",
+        30: "Wiese",
+        40: "Ackerland",
+        50: "Aufgebaut",
+        60: "Karge / spärliche Vegetation",
+        70: "Schnee und Eis",
+        80: "Dauerhafte Gewässer",
+        90: "Krautiges Feuchtgebiet",
+        95: "Mangroven",
+        100: "Moos und Flechten"
+    }
+
+
+def load_worldcover() -> ee.Image:
+    """
+    Loads the ESA WorldCover dataset.
+    
+    Returns:
+        ee.Image: The first image from the WorldCover ImageCollection
+    """
+    dataset = ee.ImageCollection("ESA/WorldCover/v100").first()
+    return dataset
+
+
+def extract_square_data(image: ee.Image, square: ee.Geometry) -> dict:
+    """
+    Extracts all pixel data for the square.
+    
+    Args:
+        image: ee.Image - The WorldCover image
+        square: ee.Geometry - The square geometry
+    
+    Returns:
+        dict: Dictionary with extracted data
+    """
+    samples = image.sample(
+        region=square,
+        scale=10,  # 10m resolution
+        numPixels=100,
+        geometries=True
+    )
+    
+    features = samples.getInfo()
+    return features
+
+
+def get_square_statistics(image: ee.Image, square: ee.Geometry) -> dict:
+    """
+    Calculates statistics for the square.
+    
+    Args:
+        image: ee.Image - The WorldCover image
+        square: ee.Geometry - The square geometry
+    
+    Returns:
+        dict: Dictionary with statistics
+    """
+    histogram = image.select('Map').reduceRegion(
+        reducer=ee.Reducer.frequencyHistogram(),
+        geometry=square,
+        scale=10,
+        maxPixels=1e9
+    )
+    
+    stats = histogram.getInfo()
+    return stats
+
+
+def extract_multiple_statistics(image: ee.Image, square: ee.Geometry, band_names: list, scale: float = 1000, debug: bool = False) -> dict:
+    """
+    Extracts statistics for multiple bands simultaneously (faster).
+    
+    Args:
+        image: ee.Image - The image
+        square: ee.Geometry - The square geometry
+        band_names: list - List of band names
+        scale: float - Resolution in meters
+        debug: bool - If True, debug info is printed
+    
+    Returns:
+        dict: Dictionary with statistics for all bands
+    """
+    available_bands = image.bandNames().getInfo()
+    if debug:
+        logger.debug(f"Available bands: {available_bands}")
+        missing_bands = [b for b in band_names if b not in available_bands]
+        if missing_bands:
+            logger.warning(f"Missing bands: {missing_bands}")
+    
+    valid_bands = [b for b in band_names if b in available_bands]
+    if not valid_bands:
+        if debug:
+            logger.warning("None of the requested bands are available!")
+        return {}
+    
+    # For very small geometries (like 10x10m square): Use sample() at center point
+    center = square.centroid()
+    
+    sample = image.select(valid_bands).sample(
+        region=center,
+        scale=scale,
+        numPixels=1
+    )
+    
+    sample_info = sample.getInfo()
+    
+    result = {}
+    if sample_info and 'features' in sample_info and len(sample_info['features']) > 0:
+        props = sample_info['features'][0].get('properties', {})
+        for band in valid_bands:
+            value = props.get(band)
+            if value is not None:
+                result[f'{band}_mean'] = value
+                result[f'{band}_min'] = value
+                result[f'{band}_max'] = value
+    
+    if debug:
+        logger.debug(f"Extracted stats: {result}")
+    
+    return result
+
+
+def get_latest_image(collection: ee.ImageCollection, date: str, debug: bool = False) -> ee.Image:
+    """
+    Gets the latest available image before/after a date.
+    
+    Args:
+        collection: ee.ImageCollection - The ImageCollection
+        date: str - Date in format "YYYY-MM-DD"
+        debug: bool - If True, debug info is printed
+    
+    Returns:
+        ee.Image: The latest image
+    """
+    date_obj = datetime.strptime(date, "%Y-%m-%d")
+    end_date = (date_obj + timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    filtered = collection.filterDate('2000-01-01', end_date).sort('system:time_start', False)
+    
+    if debug:
+        count = filtered.size().getInfo()
+        logger.debug(f"{count} images found for date <= {date}")
+    
+    return filtered.first()
+
+
+def load_gldas_data(date: str = None, debug: bool = False) -> ee.Image:
+    """
+    Loads GLDAS-2.0 data for a specific date.
+    GLDAS V20 only goes until 2014, so we use the latest available image.
+    
+    Args:
+        date: str - Date in format "YYYY-MM-DD" (default: current date or latest available)
+        debug: bool - If True, debug info is printed
+    
+    Returns:
+        ee.Image: The latest available GLDAS image
+    """
+    if date is None:
+        date = datetime.now().strftime("%Y-%m-%d")
+    
+    collection = ee.ImageCollection("NASA/GLDAS/V20/NOAH/G025/T3H")
+    
+    date_obj = datetime.strptime(date, "%Y-%m-%d")
+    start_date = date_obj.strftime("%Y-%m-%d")
+    end_date = (date_obj + timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    filtered = collection.filterDate(start_date, end_date)
+    image = filtered.first()
+    
+    if debug:
+        count = filtered.size().getInfo()
+        logger.debug(f"{count} images found for {start_date}")
+    
+    return image
+
+
+def get_all_gldas_data(square: ee.Geometry, date: str = None, debug: bool = False) -> dict:
+    """
+    Extracts all GLDAS data in a single query (faster).
+    
+    Args:
+        square: ee.Geometry - The square geometry
+        date: str - Date in format "YYYY-MM-DD" (default: current date)
+        debug: bool - If True, debug info is printed
+    
+    Returns:
+        dict: Dictionary with all GLDAS statistics
+    """
+    if date is None:
+        date = datetime.now().strftime("%Y-%m-%d")
+    
     try:
-        region = point.buffer(buffer_km * 1000)  # Convert km to meters
+        image = load_gldas_data(date, debug=debug)
         
-        # MODIS NDVI dataset (16-day composite)
-        ndvi_collection = ee.ImageCollection('MODIS/006/MOD13Q1') \
-            .filterDate(datetime.now() - timedelta(days=90), datetime.now()) \
-            .select('NDVI') \
-            .filterBounds(region)
+        # Check if image is valid
+        try:
+            image_info = image.getInfo()
+            if not image_info or 'bands' not in image_info:
+                raise Exception("Image is empty or invalid")
+        except Exception as e:
+            if debug:
+                logger.warning(f"Error checking image: {e}")
+            return {
+                'surface_temperature': {'error': str(e)},
+                'soil_moisture': {'error': str(e)},
+                'soil_temperature': {'error': str(e)},
+                'wind_speed': {'error': str(e)}
+            }
         
-        # Get the most recent image
-        latest = ndvi_collection.sort('system:time_start', False).first()
+        band_names = ['AvgSurfT_inst', 'SoilMoi0_10cm_inst', 'SoilTMP0_10cm_inst', 'Wind_f_inst']
+        all_stats = extract_multiple_statistics(image, square, band_names, scale=25000, debug=debug)
         
-        # Calculate mean NDVI in the region
-        ndvi_value = latest.reduceRegion(
-            reducer=ee.Reducer.mean(),
-            geometry=region,
-            scale=250,  # MODIS resolution
-            maxPixels=1e9
-        ).get('NDVI')
+        result = {
+            'surface_temperature': {
+                'AvgSurfT_inst_mean': all_stats.get('AvgSurfT_inst_mean'),
+                'AvgSurfT_inst_min': all_stats.get('AvgSurfT_inst_min'),
+                'AvgSurfT_inst_max': all_stats.get('AvgSurfT_inst_max')
+            },
+            'soil_moisture': {
+                'SoilMoi0_10cm_inst_mean': all_stats.get('SoilMoi0_10cm_inst_mean'),
+                'SoilMoi0_10cm_inst_min': all_stats.get('SoilMoi0_10cm_inst_min'),
+                'SoilMoi0_10cm_inst_max': all_stats.get('SoilMoi0_10cm_inst_max')
+            },
+            'soil_temperature': {
+                'SoilTMP0_10cm_inst_mean': all_stats.get('SoilTMP0_10cm_inst_mean'),
+                'SoilTMP0_10cm_inst_min': all_stats.get('SoilTMP0_10cm_inst_min'),
+                'SoilTMP0_10cm_inst_max': all_stats.get('SoilTMP0_10cm_inst_max')
+            },
+            'wind_speed': {
+                'Wind_f_inst_mean': all_stats.get('Wind_f_inst_mean'),
+                'Wind_f_inst_min': all_stats.get('Wind_f_inst_min'),
+                'Wind_f_inst_max': all_stats.get('Wind_f_inst_max')
+            }
+        }
         
-        # Convert to Python value (NDVI is scaled 0-10000, normalize to 0-1)
-        ndvi = ndvi_value.getInfo() / 10000.0 if ndvi_value else None
-        return ndvi
+        return result
     except Exception as e:
-        logger.warning(f"Failed to extract NDVI data: {e}")
-        return None
+        logger.warning(f"Error extracting GLDAS data: {e}")
+        return {
+            'surface_temperature': {'error': str(e)},
+            'soil_moisture': {'error': str(e)},
+            'soil_temperature': {'error': str(e)},
+            'wind_speed': {'error': str(e)}
+        }
 
 
-def get_temperature_data(point: ee.Geometry, buffer_km: float = 5.0) -> Optional[Tuple[float, float]]:
+def load_modis_ndvi(date: str = None) -> ee.Image:
     """
-    Extract land surface temperature data and calculate anomaly.
+    Loads MODIS vegetation indices for a specific date.
     
     Args:
-        point: Earth Engine Geometry point
-        buffer_km: Buffer radius in kilometers
-        
+        date: str - Date in format "YYYY-MM-DD" (default: current date)
+    
     Returns:
-        Tuple of (current_temp, historical_avg_temp) in Celsius, or None
+        ee.Image: The latest available MODIS NDVI image
     """
+    if date is None:
+        date = datetime.now().strftime("%Y-%m-%d")
+    
+    collection = ee.ImageCollection("MODIS/061/MOD13A1")
+    return get_latest_image(collection, date)
+
+
+def get_vegetation_indices(square: ee.Geometry, date: str = None, debug: bool = False) -> dict:
+    """
+    Extracts vegetation indices (NDVI, EVI) for the square.
+    
+    Args:
+        square: ee.Geometry - The square geometry
+        date: str - Date in format "YYYY-MM-DD" (default: current date)
+        debug: bool - If True, debug info is printed
+    
+    Returns:
+        dict: Dictionary with NDVI and EVI statistics
+    """
+    if date is None:
+        date = datetime.now().strftime("%Y-%m-%d")
+    
     try:
-        region = point.buffer(buffer_km * 1000)
+        image = load_modis_ndvi(date)
+        center = square.centroid()
+        sample = image.select(['NDVI', 'EVI']).sample(
+            region=center,
+            scale=500,
+            numPixels=1
+        )
+        sample_info = sample.getInfo()
         
-        # MODIS Land Surface Temperature
-        temp_collection = ee.ImageCollection('MODIS/006/MOD11A2') \
-            .select('LST_Day_1km') \
-            .filterBounds(region)
+        all_stats = {}
+        if sample_info and 'features' in sample_info and len(sample_info['features']) > 0:
+            props = sample_info['features'][0].get('properties', {})
+            for band in ['NDVI', 'EVI']:
+                value = props.get(band)
+                if value is not None:
+                    # MODIS NDVI/EVI are scaled (0-10000), divide by 10000
+                    scaled_value = value / 10000.0 if value > 1 else value
+                    all_stats[f'{band}_mean'] = scaled_value
+                    all_stats[f'{band}_min'] = scaled_value
+                    all_stats[f'{band}_max'] = scaled_value
         
-        # Current temperature (last 30 days)
-        current = temp_collection.filterDate(
-            datetime.now() - timedelta(days=30),
-            datetime.now()
-        ).mean()
+        result = {
+            'NDVI': {
+                'NDVI_mean': all_stats.get('NDVI_mean'),
+                'NDVI_min': all_stats.get('NDVI_min'),
+                'NDVI_max': all_stats.get('NDVI_max')
+            },
+            'EVI': {
+                'EVI_mean': all_stats.get('EVI_mean'),
+                'EVI_min': all_stats.get('EVI_min'),
+                'EVI_max': all_stats.get('EVI_max')
+            }
+        }
         
-        # Historical average (same period last year, 3-year average)
-        historical_start = datetime.now() - timedelta(days=1095)  # 3 years ago
-        historical_end = datetime.now() - timedelta(days=365)
-        historical = temp_collection.filterDate(historical_start, historical_end).mean()
+        return result
+    except Exception as e:
+        if debug:
+            logger.warning(f"Error extracting vegetation indices: {e}")
+        return {'NDVI': {'error': str(e)}, 'EVI': {'error': str(e)}}
+
+
+def get_historical_fires(square: ee.Geometry, start_date: str = None, end_date: str = None, debug: bool = False) -> dict:
+    """
+    Checks if there was ever a wildfire in the past in this pixel.
+    FIRMS is an ImageCollection, not FeatureCollection!
+    
+    Args:
+        square: ee.Geometry - The square geometry
+        start_date: str - Start date in format "YYYY-MM-DD" (default: 10 years ago)
+        end_date: str - End date in format "YYYY-MM-DD" (default: current date)
+        debug: bool - If True, debug info is printed
+    
+    Returns:
+        dict: Dictionary with fire statistics
+    """
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    if start_date is None:
+        start_date = (datetime.now() - timedelta(days=3650)).strftime("%Y-%m-%d")
+    
+    try:
+        firms = ee.ImageCollection('FIRMS')
+        filtered = firms.filterDate(start_date, end_date)
         
-        # Extract values
-        current_temp = current.reduceRegion(
-            reducer=ee.Reducer.mean(),
-            geometry=region,
+        center = square.centroid()
+        fires_mosaic = filtered.select('T21').mosaic()
+        
+        fire_sample = fires_mosaic.sample(
+            region=center,
             scale=1000,
-            maxPixels=1e9
-        ).get('LST_Day_1km')
+            numPixels=1
+        )
         
-        hist_temp = historical.reduceRegion(
-            reducer=ee.Reducer.mean(),
-            geometry=region,
+        fire_sample_info = fire_sample.getInfo()
+        has_fire = False
+        fire_value = None
+        
+        if fire_sample_info and 'features' in fire_sample_info and len(fire_sample_info['features']) > 0:
+            props = fire_sample_info['features'][0].get('properties', {})
+            fire_value = props.get('T21')
+            has_fire = fire_value is not None and fire_value > 0
+        
+        fire_mask = fires_mosaic.gt(0)
+        fire_count = fire_mask.reduceRegion(
+            reducer=ee.Reducer.sum(),
+            geometry=center.buffer(500),
             scale=1000,
-            maxPixels=1e9
-        ).get('LST_Day_1km')
+            maxPixels=1e9,
+            bestEffort=True
+        )
         
-        # MODIS LST is in Kelvin * 0.02, convert to Celsius
-        current_c = (current_temp.getInfo() * 0.02 - 273.15) if current_temp else None
-        hist_c = (hist_temp.getInfo() * 0.02 - 273.15) if hist_temp else None
+        count_value = fire_count.getInfo().get('T21', 0)
         
-        return (current_c, hist_c) if (current_c is not None and hist_c is not None) else None
+        start = datetime.strptime(start_date, "%Y-%m-%d")
+        end = datetime.strptime(end_date, "%Y-%m-%d")
+        years = (end - start).days / 365.25
+        
+        fires_per_year = count_value / years if years > 0 else 0.0
+        
+        last_fire_date = None
+        if has_fire:
+            try:
+                sorted_collection = filtered.sort('system:time_start', False)
+                collection_size = filtered.size().getInfo()
+                for i in range(min(20, collection_size)):
+                    image = ee.Image(sorted_collection.toList(1, i).get(0))
+                    fire_sample_img = image.select('T21').sample(
+                        region=center,
+                        scale=1000,
+                        numPixels=1
+                    )
+                    fire_sample_img_info = fire_sample_img.getInfo()
+                    if fire_sample_img_info and 'features' in fire_sample_img_info:
+                        props = fire_sample_img_info['features'][0].get('properties', {})
+                        t21_value = props.get('T21')
+                        if t21_value and t21_value > 0:
+                            date_prop = image.get('system:time_start').getInfo()
+                            if date_prop:
+                                last_fire_date = datetime.fromtimestamp(date_prop / 1000).strftime("%Y-%m-%d")
+                                break
+            except Exception as e:
+                if debug:
+                    logger.warning(f"Could not retrieve last fire date: {e}")
+        
+        result = {
+            'has_fire': has_fire,
+            'last_fire_date': last_fire_date,
+            'total_fires_in_period': int(count_value),
+            'fires_per_year': round(fires_per_year, 2)
+        }
+        
+        return result
     except Exception as e:
-        logger.warning(f"Failed to extract temperature data: {e}")
-        return None
+        if debug:
+            logger.warning(f"Error extracting fire history: {e}")
+        return {'error': str(e)}
 
 
-def get_precipitation_data(point: ee.Geometry, buffer_km: float = 5.0) -> Optional[Tuple[float, float]]:
+def load_water_mask() -> ee.Image:
     """
-    Extract precipitation data and calculate deficit.
+    Loads GLCF water mask.
+    
+    Returns:
+        ee.Image: The water mask image
+    """
+    collection = ee.ImageCollection("GLCF/GLS_WATER")
+    return collection.first()
+
+
+def get_water_bodies(square: ee.Geometry, debug: bool = False) -> dict:
+    """
+    Extracts water body information for the square.
     
     Args:
-        point: Earth Engine Geometry point
-        buffer_km: Buffer radius in kilometers
-        
+        square: ee.Geometry - The square geometry
+        debug: bool - If True, debug info is printed
+    
     Returns:
-        Tuple of (current_precip, historical_avg_precip) in mm, or None
+        dict: Dictionary with water coverage statistics
     """
     try:
-        region = point.buffer(buffer_km * 1000)
+        image = load_water_mask()
         
-        # CHIRPS Daily Precipitation
-        precip_collection = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY') \
-            .select('precipitation') \
-            .filterBounds(region)
+        water_stats = image.select('water').reduceRegion(
+            reducer=ee.Reducer.frequencyHistogram(),
+            geometry=square,
+            scale=30,
+            maxPixels=1e9,
+            bestEffort=True
+        )
         
-        # Current precipitation (last 90 days)
-        current = precip_collection.filterDate(
-            datetime.now() - timedelta(days=90),
-            datetime.now()
-        ).sum()
+        stats = water_stats.getInfo()
         
-        # Historical average (same period, 5-year average)
-        historical_start = datetime.now() - timedelta(days=1825)  # 5 years ago
-        historical_end = datetime.now() - timedelta(days=365)
-        historical = precip_collection.filterDate(
-            historical_start,
-            historical_end
-        ).filter(
-            ee.Filter.dayOfYear(
-                (datetime.now() - timedelta(days=90)).timetuple().tm_yday,
-                datetime.now().timetuple().tm_yday
-            )
-        ).mean().multiply(90)  # Average daily * 90 days
+        water_coverage = 0.0
+        if 'water' in stats and stats['water']:
+            histogram = stats['water']
+            total_pixels = sum(float(v) for v in histogram.values())
+            water_pixels = histogram.get('1', 0)
+            if total_pixels > 0:
+                water_coverage = (float(water_pixels) / total_pixels) * 100.0
         
-        # Extract values
-        current_precip = current.reduceRegion(
-            reducer=ee.Reducer.mean(),
-            geometry=region,
-            scale=5566,  # CHIRPS resolution
-            maxPixels=1e9
-        ).get('precipitation')
+        center = square.centroid()
+        buffer = center.buffer(100)
         
-        hist_precip = historical.reduceRegion(
-            reducer=ee.Reducer.mean(),
-            geometry=region,
-            scale=5566,
-            maxPixels=1e9
-        ).get('precipitation')
+        nearby_water_stats = image.select('water').reduceRegion(
+            reducer=ee.Reducer.frequencyHistogram(),
+            geometry=buffer,
+            scale=30,
+            maxPixels=1e9,
+            bestEffort=True
+        )
         
-        current_mm = current_precip.getInfo() if current_precip else None
-        hist_mm = hist_precip.getInfo() if hist_precip else None
+        nearby_stats = nearby_water_stats.getInfo()
+        nearby_water_coverage = 0.0
+        if 'water' in nearby_stats and nearby_stats['water']:
+            histogram = nearby_stats['water']
+            total_pixels = sum(float(v) for v in histogram.values())
+            water_pixels = histogram.get('1', 0)
+            if total_pixels > 0:
+                nearby_water_coverage = (float(water_pixels) / total_pixels) * 100.0
         
-        return (current_mm, hist_mm) if (current_mm is not None and hist_mm is not None) else None
+        result = {
+            'water_coverage_percent': water_coverage,
+            'nearby_water_coverage_percent': nearby_water_coverage
+        }
+        
+        return result
     except Exception as e:
-        logger.warning(f"Failed to extract precipitation data: {e}")
-        return None
+        if debug:
+            logger.warning(f"Error extracting water data: {e}")
+        return {'error': str(e)}
 
 
-def get_historical_fire_data(point: ee.Geometry, buffer_km: float = 10.0) -> Optional[int]:
+def extract_all_risk_data(lat: float, lon: float, date: str = None, fire_history_start: str = None, debug: bool = False) -> dict:
     """
-    Count historical fires in the region.
+    Collects all wildfire risk data for the location.
     
     Args:
-        point: Earth Engine Geometry point
-        buffer_km: Buffer radius in kilometers (larger for fire history)
-        
+        lat: Latitude
+        lon: Longitude
+        date: str - Date in format "YYYY-MM-DD" (default: current date)
+        fire_history_start: str - Start date for historical fires (default: 10 years ago)
+        debug: bool - If True, debug info is printed
+    
     Returns:
-        Number of fires in the last 5 years, or None
+        dict: Dictionary with all extracted data
     """
+    if date is None:
+        date = datetime.now().strftime("%Y-%m-%d")
+    if fire_history_start is None:
+        fire_history_start = (datetime.now() - timedelta(days=3650)).strftime("%Y-%m-%d")
+    
+    square = get_square_from_coordinates(lat, lon, size_meters=10)
+    
+    all_data = {
+        "square_info": {
+            "center_lon": lon,
+            "center_lat": lat,
+            "size_meters": 10,
+            "date": date
+        },
+        "worldcover": {},
+        "fire_history": {},
+        "current_conditions": {}
+    }
+    
+    # WorldCover data
     try:
-        region = point.buffer(buffer_km * 1000)
-        
-        # MODIS Burned Area dataset
-        fire_collection = ee.ImageCollection('MODIS/006/MCD64A1') \
-            .filterDate(datetime.now() - timedelta(days=1825), datetime.now()) \
-            .select('BurnDate') \
-            .filterBounds(region)
-        
-        # Count unique burn dates (each date represents a fire event)
-        # Create a mask where BurnDate > 0 (burned area)
-        burned_areas = fire_collection.map(lambda img: img.gt(0))
-        
-        # Sum all burned areas and count pixels
-        total_burned = burned_areas.sum()
-        
-        # Count pixels with at least one fire
-        fire_count = total_burned.reduceRegion(
-            reducer=ee.Reducer.count(),
-            geometry=region,
-            scale=500,  # MODIS resolution
-            maxPixels=1e9
-        ).get('BurnDate')
-        
-        # Alternative: count distinct fire events by counting images with burned area
-        # This is a simplified approach - count images with significant burned area
-        fire_events = fire_collection.size().getInfo()
-        
-        return fire_events if fire_events else 0
+        worldcover = load_worldcover()
+        features = extract_square_data(worldcover, square)
+        stats = get_square_statistics(worldcover, square)
+        all_data["worldcover"] = {
+            "features": features,
+            "statistics": stats
+        }
     except Exception as e:
-        logger.warning(f"Failed to extract historical fire data: {e}")
-        return None
-
-
-def get_elevation_data(point: ee.Geometry, buffer_km: float = 5.0) -> Optional[float]:
-    """
-    Extract elevation data.
+        logger.warning(f"Error extracting WorldCover data: {e}")
+        all_data["worldcover"] = {"error": str(e)}
     
-    Args:
-        point: Earth Engine Geometry point
-        buffer_km: Buffer radius in kilometers
-        
-    Returns:
-        Average elevation in meters, or None
-    """
+    # Historical fires
     try:
-        region = point.buffer(buffer_km * 1000)
-        
-        # NASA NASADEM elevation dataset
-        elevation = ee.Image('NASA/NASADEM_HGT/001').select('elevation')
-        
-        elev_value = elevation.reduceRegion(
-            reducer=ee.Reducer.mean(),
-            geometry=region,
-            scale=30,  # 30m resolution
-            maxPixels=1e9
-        ).get('elevation')
-        
-        return elev_value.getInfo() if elev_value else None
+        fire_data = get_historical_fires(square, fire_history_start, date, debug=debug)
+        all_data["fire_history"] = fire_data
     except Exception as e:
-        logger.warning(f"Failed to extract elevation data: {e}")
-        return None
-
-
-def calculate_risk_score(
-    ndvi: Optional[float],
-    temp_data: Optional[Tuple[float, float]],
-    precip_data: Optional[Tuple[float, float]],
-    fire_count: Optional[int],
-    elevation: Optional[float]
-) -> Tuple[float, str]:
-    """
-    Calculate wildfire risk score (0-10) using weighted factors.
+        logger.warning(f"Error extracting fire history: {e}")
+        all_data["fire_history"] = {"error": str(e)}
     
-    Weights:
-    - Historical fire frequency: 30%
-    - Current vegetation/fuel load (NDVI): 25%
-    - Temperature anomalies: 20%
-    - Precipitation deficit: 15%
-    - Elevation/terrain: 10%
+    # Current conditions
+    current_conditions = {}
     
-    Args:
-        ndvi: NDVI value (0-1)
-        temp_data: Tuple of (current_temp, historical_avg_temp) in Celsius
-        precip_data: Tuple of (current_precip, historical_avg_precip) in mm
-        fire_count: Number of historical fires
-        elevation: Elevation in meters
-        
-    Returns:
-        Tuple of (risk_score 0-10, explanation string)
-    """
-    score_components = []
-    explanations = []
+    # GLDAS data
+    try:
+        gldas_data = get_all_gldas_data(square, date, debug=debug)
+        current_conditions["surface_temperature"] = gldas_data["surface_temperature"]
+        current_conditions["soil_moisture"] = gldas_data["soil_moisture"]
+        current_conditions["soil_temperature"] = gldas_data["soil_temperature"]
+        current_conditions["wind_speed"] = gldas_data["wind_speed"]
+    except Exception as e:
+        logger.warning(f"Error extracting GLDAS data: {e}")
+        current_conditions["surface_temperature"] = {"error": str(e)}
+        current_conditions["soil_moisture"] = {"error": str(e)}
+        current_conditions["soil_temperature"] = {"error": str(e)}
+        current_conditions["wind_speed"] = {"error": str(e)}
     
-    # 1. Historical fire frequency (30% weight)
-    if fire_count is not None:
-        # Normalize fire count to 0-10 scale
-        # 0 fires = 0, 1-2 fires = 2-4, 3-5 fires = 5-7, 6+ fires = 8-10
-        if fire_count == 0:
-            fire_score = 0
-            fire_expl = "No historical fires in the region"
-        elif fire_count <= 2:
-            fire_score = 2 + (fire_count - 1) * 2
-            fire_expl = f"{fire_count} historical fire(s) detected"
-        elif fire_count <= 5:
-            fire_score = 5 + (fire_count - 3) * 1
-            fire_expl = f"{fire_count} historical fires indicate moderate risk"
-        else:
-            fire_score = min(10, 8 + (fire_count - 6) * 0.5)
-            fire_expl = f"{fire_count} historical fires indicate high risk"
-        
-        score_components.append(("fire_frequency", fire_score, 0.30))
-        explanations.append(fire_expl)
-    else:
-        score_components.append(("fire_frequency", 5.0, 0.30))  # Default moderate
-        explanations.append("Historical fire data unavailable")
+    # Vegetation indices
+    try:
+        vegetation = get_vegetation_indices(square, date, debug=debug)
+        current_conditions["vegetation"] = vegetation
+    except Exception as e:
+        logger.warning(f"Error extracting vegetation indices: {e}")
+        current_conditions["vegetation"] = {"error": str(e)}
     
-    # 2. Vegetation/fuel load - NDVI (25% weight)
-    if ndvi is not None:
-        # Higher NDVI = more vegetation = more fuel = higher risk
-        # NDVI 0-0.3 (sparse) = 0-3, 0.3-0.6 (moderate) = 3-7, 0.6+ (dense) = 7-10
-        if ndvi < 0.3:
-            veg_score = ndvi / 0.3 * 3
-            veg_expl = "Low vegetation density"
-        elif ndvi < 0.6:
-            veg_score = 3 + ((ndvi - 0.3) / 0.3) * 4
-            veg_expl = "Moderate vegetation density"
-        else:
-            veg_score = 7 + min(3, ((ndvi - 0.6) / 0.4) * 3)
-            veg_expl = "High vegetation density (high fuel load)"
-        
-        score_components.append(("vegetation", veg_score, 0.25))
-        explanations.append(veg_expl)
-    else:
-        score_components.append(("vegetation", 5.0, 0.25))
-        explanations.append("Vegetation data unavailable")
+    # Water bodies
+    try:
+        water = get_water_bodies(square, debug=debug)
+        current_conditions["water_coverage"] = water.get("water_coverage_percent")
+        current_conditions["nearby_water_coverage"] = water.get("nearby_water_coverage_percent")
+    except Exception as e:
+        logger.warning(f"Error extracting water data: {e}")
+        current_conditions["water_coverage"] = None
+        current_conditions["nearby_water_coverage"] = None
     
-    # 3. Temperature anomalies (20% weight)
-    if temp_data:
-        current_temp, hist_temp = temp_data
-        temp_anomaly = current_temp - hist_temp
-        
-        # Positive anomaly = higher risk
-        # -5°C or less = 0, 0°C = 5, +5°C or more = 10
-        if temp_anomaly <= -5:
-            temp_score = 0
-            temp_expl = f"Temperature {temp_anomaly:.1f}°C below average"
-        elif temp_anomaly <= 0:
-            temp_score = 5 + (temp_anomaly / -5) * 5
-            temp_expl = f"Temperature {temp_anomaly:.1f}°C below average"
-        elif temp_anomaly <= 5:
-            temp_score = 5 + (temp_anomaly / 5) * 5
-            temp_expl = f"Temperature {temp_anomaly:.1f}°C above average"
-        else:
-            temp_score = 10
-            temp_expl = f"Temperature {temp_anomaly:.1f}°C above average (high risk)"
-        
-        score_components.append(("temperature", temp_score, 0.20))
-        explanations.append(temp_expl)
-    else:
-        score_components.append(("temperature", 5.0, 0.20))
-        explanations.append("Temperature data unavailable")
+    all_data["current_conditions"] = current_conditions
     
-    # 4. Precipitation deficit (15% weight)
-    if precip_data:
-        current_precip, hist_precip = precip_data
-        precip_deficit = ((hist_precip - current_precip) / hist_precip * 100) if hist_precip > 0 else 0
-        
-        # Higher deficit = higher risk
-        # 0% deficit = 0, 50% deficit = 7.5, 100%+ deficit = 10
-        if precip_deficit <= 0:
-            precip_score = 0
-            precip_expl = "Precipitation at or above average"
-        elif precip_deficit <= 50:
-            precip_score = (precip_deficit / 50) * 7.5
-            precip_expl = f"{precip_deficit:.0f}% precipitation deficit"
-        else:
-            precip_score = 7.5 + min(2.5, ((precip_deficit - 50) / 50) * 2.5)
-            precip_expl = f"{precip_deficit:.0f}% precipitation deficit (severe drought)"
-        
-        score_components.append(("precipitation", precip_score, 0.15))
-        explanations.append(precip_expl)
-    else:
-        score_components.append(("precipitation", 5.0, 0.15))
-        explanations.append("Precipitation data unavailable")
-    
-    # 5. Elevation/terrain (10% weight)
-    if elevation is not None:
-        # Higher elevation can mean more complex terrain, but also cooler temps
-        # Very low elevation (<100m) = 2, moderate (100-500m) = 5, high (>500m) = 8
-        if elevation < 100:
-            elev_score = 2
-            elev_expl = "Low elevation"
-        elif elevation < 500:
-            elev_score = 2 + ((elevation - 100) / 400) * 6
-            elev_expl = f"Moderate elevation ({elevation:.0f}m)"
-        else:
-            elev_score = 8 + min(2, ((elevation - 500) / 1000) * 2)
-            elev_expl = f"High elevation ({elevation:.0f}m, complex terrain)"
-        
-        score_components.append(("elevation", elev_score, 0.10))
-        explanations.append(elev_expl)
-    else:
-        score_components.append(("elevation", 5.0, 0.10))
-        explanations.append("Elevation data unavailable")
-    
-    # Calculate weighted score
-    total_score = sum(score * weight for _, score, weight in score_components)
-    
-    # Create explanation
-    explanation = ". ".join(explanations[:3])  # Top 3 factors
-    if len(explanations) > 3:
-        explanation += "."
-    
-    return (round(total_score, 1), explanation)
+    return all_data
 
 
 def calculate_wildfire_risk_ee(lat: float, lon: float, timeout_seconds: int = 30) -> Optional[Dict]:
     """
     Calculate wildfire risk using Google Earth Engine data.
+    Maintains backward compatibility with existing code.
     
     Args:
         lat: Latitude
         lon: Longitude
-        timeout_seconds: Maximum time to wait for Earth Engine operations
+        timeout_seconds: Maximum time to wait for Earth Engine operations (not used, kept for compatibility)
         
     Returns:
         Dictionary with 'score' (0-10), 'explanation', and 'data_sources' keys,
@@ -469,51 +746,115 @@ def calculate_wildfire_risk_ee(lat: float, lon: float, timeout_seconds: int = 30
     try:
         logger.info(f"Calculating wildfire risk for coordinates: ({lat}, {lon})")
         
-        # Create point geometry
-        point = ee.Geometry.Point([lon, lat])
+        # Get all location data
+        location_data = extract_all_risk_data(lat, lon, debug=False)
         
-        # Extract data from various sources
-        logger.debug("Extracting NDVI data...")
-        ndvi = get_ndvi_data(point)
+        # Extract relevant data for risk calculation
+        fire_history = location_data.get("fire_history", {})
+        current_conditions = location_data.get("current_conditions", {})
+        vegetation = current_conditions.get("vegetation", {})
         
-        logger.debug("Extracting temperature data...")
-        temp_data = get_temperature_data(point)
+        # Get NDVI
+        ndvi = None
+        if "NDVI" in vegetation and "NDVI_mean" in vegetation["NDVI"]:
+            ndvi = vegetation["NDVI"]["NDVI_mean"]
         
-        logger.debug("Extracting precipitation data...")
-        precip_data = get_precipitation_data(point)
+        # Get fire count
+        fire_count = None
+        if "total_fires_in_period" in fire_history:
+            fire_count = fire_history["total_fires_in_period"]
         
-        logger.debug("Extracting historical fire data...")
-        fire_count = get_historical_fire_data(point)
+        # Get temperature data (convert from Kelvin to Celsius)
+        temp_data = None
+        surface_temp = current_conditions.get("surface_temperature", {})
+        if "AvgSurfT_inst_mean" in surface_temp and surface_temp["AvgSurfT_inst_mean"]:
+            temp_k = surface_temp["AvgSurfT_inst_mean"]
+            temp_c = temp_k - 273.15
+            # Use current temp as both current and historical (simplified)
+            temp_data = (temp_c, temp_c)
         
-        logger.debug("Extracting elevation data...")
-        elevation = get_elevation_data(point)
+        # Calculate risk score (simplified version)
+        score = 0.0
+        explanations = []
         
-        # Calculate risk score
-        score, explanation = calculate_risk_score(
-            ndvi, temp_data, precip_data, fire_count, elevation
-        )
+        # Fire history (30% weight)
+        if fire_count is not None:
+            if fire_count == 0:
+                fire_score = 0
+                fire_expl = "No historical fires in the region"
+            elif fire_count <= 2:
+                fire_score = 2 + (fire_count - 1) * 2
+                fire_expl = f"{fire_count} historical fire(s) detected"
+            elif fire_count <= 5:
+                fire_score = 5 + (fire_count - 3) * 1
+                fire_expl = f"{fire_count} historical fires indicate moderate risk"
+            else:
+                fire_score = min(10, 8 + (fire_count - 6) * 0.5)
+                fire_expl = f"{fire_count} historical fires indicate high risk"
+            score += fire_score * 0.30
+            explanations.append(fire_expl)
+        else:
+            score += 5.0 * 0.30
+            explanations.append("Historical fire data unavailable")
         
-        # Track which data sources were successfully retrieved
+        # Vegetation/NDVI (25% weight)
+        if ndvi is not None:
+            if ndvi < 0.3:
+                veg_score = ndvi / 0.3 * 3
+                veg_expl = "Low vegetation density"
+            elif ndvi < 0.6:
+                veg_score = 3 + ((ndvi - 0.3) / 0.3) * 4
+                veg_expl = "Moderate vegetation density"
+            else:
+                veg_score = 7 + min(3, ((ndvi - 0.6) / 0.4) * 3)
+                veg_expl = "High vegetation density (high fuel load)"
+            score += veg_score * 0.25
+            explanations.append(veg_expl)
+        else:
+            score += 5.0 * 0.25
+            explanations.append("Vegetation data unavailable")
+        
+        # Temperature (20% weight) - simplified
+        if temp_data:
+            score += 5.0 * 0.20  # Default moderate
+            explanations.append("Temperature data available")
+        else:
+            score += 5.0 * 0.20
+            explanations.append("Temperature data unavailable")
+        
+        # Precipitation (15% weight) - not available in current data
+        score += 5.0 * 0.15
+        explanations.append("Precipitation data unavailable")
+        
+        # Elevation (10% weight) - not available in current data
+        score += 5.0 * 0.10
+        explanations.append("Elevation data unavailable")
+        
+        explanation = ". ".join(explanations[:3])
+        if len(explanations) > 3:
+            explanation += "."
+        
+        # Track data sources
         data_sources = {
             "ndvi": ndvi is not None,
             "temperature": temp_data is not None,
-            "precipitation": precip_data is not None,
+            "precipitation": False,
             "historical_fires": fire_count is not None,
-            "elevation": elevation is not None
+            "elevation": False
         }
         
         logger.info(f"Wildfire risk calculated: {score}/10")
         
         return {
-            "score": score,
+            "score": round(score, 1),
             "explanation": explanation,
             "data_sources": data_sources,
             "raw_data": {
                 "ndvi": ndvi,
                 "temperature": temp_data,
-                "precipitation": precip_data,
+                "precipitation": None,
                 "fire_count": fire_count,
-                "elevation": elevation
+                "elevation": None
             }
         }
         
@@ -521,4 +862,3 @@ def calculate_wildfire_risk_ee(lat: float, lon: float, timeout_seconds: int = 30
         logger.error(f"Error calculating wildfire risk with Earth Engine: {e}")
         logger.debug(traceback.format_exc())
         return None
-

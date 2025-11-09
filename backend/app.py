@@ -18,13 +18,16 @@ logger = logging.getLogger(__name__)
 
 # Import Earth Engine wildfire risk module
 try:
-    from wildfire_risk_ee import calculate_wildfire_risk_ee
+    from wildfire_risk_ee import calculate_wildfire_risk_ee, extract_all_risk_data
     EE_WILDFIRE_AVAILABLE = True
 except ImportError:
     EE_WILDFIRE_AVAILABLE = False
     logger.warning("Earth Engine wildfire risk module not available")
 
-load_dotenv()
+# Load .env from root directory (where credentials.json is located)
+import pathlib
+root_dir = pathlib.Path(__file__).parent.parent
+load_dotenv(root_dir / '.env')
 app = Flask(__name__)
 CORS(app)
 
@@ -290,8 +293,9 @@ def handle_risk_report():
                 logger.error(traceback.format_exc())
                 return jsonify({"error": "An unknown geocoding error occurred.", "details": str(e)}), 500
 
-        # --- Get Earth Engine Wildfire Risk (if available) ---
+        # --- Get Earth Engine Wildfire Risk and Location Data (if available) ---
         wildfire_risk_ee = None
+        location_data = None
         if EE_WILDFIRE_AVAILABLE:
             try:
                 logger.info(f"Attempting Earth Engine wildfire risk calculation for ({lat}, {lon})")
@@ -304,6 +308,16 @@ def handle_risk_report():
                 logger.warning(f"Earth Engine wildfire risk calculation failed: {e}")
                 logger.debug(traceback.format_exc())
                 wildfire_risk_ee = None
+            
+            # Get detailed location data (WorldCover, fires, conditions, etc.)
+            try:
+                logger.info(f"Fetching detailed location data for ({lat}, {lon})")
+                location_data = extract_all_risk_data(lat, lon, debug=False)
+                logger.info("Location data fetched successfully")
+            except Exception as e:
+                logger.warning(f"Failed to fetch location data: {e}")
+                logger.debug(traceback.format_exc())
+                location_data = None
         
         # --- Get AI Report ---
         logger.info(f"Calling get_ai_risk_report for address: {address}, lat: {lat}, lon: {lon}")
@@ -338,6 +352,11 @@ def handle_risk_report():
                     # Ensure score is within valid range
                     risk_score["score"] = max(0, min(100, risk_score["score"]))
 
+        # Add location data to response if available
+        if location_data:
+            report["location_data"] = location_data
+            logger.info("Location data added to response")
+        
         logger.info("Returning successful response")
         logger.debug(f"Response structure: {json.dumps({k: type(v).__name__ for k, v in report.items()}, indent=2)}")
         

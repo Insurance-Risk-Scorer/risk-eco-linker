@@ -1,0 +1,85 @@
+{
+  "square_info": {
+    "center_lon": 11.5761,
+    "center_lat": 48.1374,
+    "size_meters": 10,
+    "date": "2010-06-01"
+  },
+  "worldcover": {
+    "features": {
+      "type": "FeatureCollection",
+      "columns": {
+        "Map": "Short<0, 255>"
+      },
+      "properties": {
+        "band_order": [
+          "Map"
+        ]
+      },
+      "features": [
+        {
+          "type": "Feature",
+          "geometry": {
+            "geodesic": false,
+            "type": "Point",
+            "coordinates": [
+              11.576109880019544,
+              48.13741231161626
+            ]
+          },
+          "id": "0",
+          "properties": {
+            "Map": 50
+          }
+        }
+      ]
+    },
+    "statistics": {
+      "Map": {
+        "50": 1.4862745098039216
+      }
+    }
+  },
+  "fire_history": {
+    "has_fire": false,
+    "last_fire_date": null,
+    "total_fires_in_period": 0,
+    "fires_per_year": 0.0
+  },
+  "current_conditions": {
+    "surface_temperature": {
+      "AvgSurfT_inst_mean": 282.5347595214844,
+      "AvgSurfT_inst_min": 282.5347595214844,
+      "AvgSurfT_inst_max": 282.5347595214844
+    },
+    "soil_moisture": {
+      "SoilMoi0_10cm_inst_mean": 32.13800048828125,
+      "SoilMoi0_10cm_inst_min": 32.13800048828125,
+      "SoilMoi0_10cm_inst_max": 32.13800048828125
+    },
+    "soil_temperature": {
+      "SoilTMP0_10cm_inst_mean": 285.4778747558594,
+      "SoilTMP0_10cm_inst_min": 285.4778747558594,
+      "SoilTMP0_10cm_inst_max": 285.4778747558594
+    },
+    "wind_speed": {
+      "Wind_f_inst_mean": 3.881669282913208,
+      "Wind_f_inst_min": 3.881669282913208,
+      "Wind_f_inst_max": 3.881669282913208
+    },
+    "vegetation": {
+      "NDVI": {
+        "NDVI_mean": 0.2222,
+        "NDVI_min": 0.2222,
+        "NDVI_max": 0.2222
+      },
+      "EVI": {
+        "EVI_mean": 0.1266,
+        "EVI_min": 0.1266,
+        "EVI_max": 0.1266
+      }
+    },
+    "water_coverage": 0.0,
+    "nearby_water_coverage": 0.0
+  }
+}

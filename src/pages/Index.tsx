@@ -2,6 +2,7 @@ import { useState } from "react";
 import { AddressInput } from "@/components/AddressInput";
 import { RiskScoreCard } from "@/components/RiskScoreCard";
 import { DecisionBadge } from "@/components/DecisionBadge";
+import { LocationDataCard } from "@/components/LocationDataCard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Shield, MapPin, AlertCircle } from "lucide-react";
@@ -22,6 +23,7 @@ interface RiskReport {
   risk_scores: RiskScore[];
   overall_summary: string;
   automated_decision: string;
+  location_data?: any; // Optional Earth Engine location data
 }
 
 const Index = () => {
@@ -148,6 +150,11 @@ const Index = () => {
                   </p>
                 </CardContent>
               </Card>
+
+              {/* Location Data (Earth Engine) */}
+              {report.location_data && (
+                <LocationDataCard locationData={report.location_data} />
+              )}
 
               {/* Risk Scores Grid */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-5xl mx-auto">
