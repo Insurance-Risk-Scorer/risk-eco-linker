@@ -1,6 +1,23 @@
 # Environmental Risk Scorer
 
-# EXPLAINING VIDEO WALKTHROUGH: https://www.loom.com/share/3058f9451642467c8170d73be81ef338
+<div align="center">
+
+### 🎬 Video Walkthrough
+<a href="https://www.loom.com/share/3058f9451642467c8170d73be81ef338">
+  <img alt="Video Walkthrough" src="https://img.shields.io/badge/Watch%20Video-Walkthrough-blue?style=for-the-badge&logo=loom" />
+</a>
+
+### 🛠️ Tech Stack Overview
+<a href="techstackvideo.mp4">
+  <img alt="Tech Stack Video" src="https://img.shields.io/badge/Watch%20Video-Tech%20Stack-lightgrey?style=for-the-badge&logo=vlc-media-player" />
+</a>
+
+### 🌐 Live Demo
+<a href="http://194.13.83.61:8080/">
+  <img alt="Live Demo" src="https://img.shields.io/badge/Live-Demo-brightgreen?style=for-the-badge&logo=livewire" />
+</a>
+
+</div>
 
 A professional property risk assessment platform for insurance underwriters. Get comprehensive flood, wildfire, storm, and drought risk analysis powered by AI and Google Earth Engine.
 
