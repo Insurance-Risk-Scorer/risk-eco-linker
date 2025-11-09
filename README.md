@@ -1,5 +1,7 @@
 # Environmental Risk Scorer
 
+# EXPLAINING VIDEO WALKTHROUGH: https://www.loom.com/share/3058f9451642467c8170d73be81ef338
+
 A professional property risk assessment platform for insurance underwriters. Get comprehensive flood, wildfire, storm, and drought risk analysis powered by AI and Google Earth Engine.
 
 ## Features

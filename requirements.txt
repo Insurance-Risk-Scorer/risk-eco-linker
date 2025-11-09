@@ -1,0 +1,9 @@
+# Python packages to be installed by pip
+flask
+flask-cors
+geopy
+python-dotenv
+google-generativeai
+earthengine-api
+requests
+gunicorn
